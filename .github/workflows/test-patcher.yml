@@ -162,7 +162,11 @@ jobs:
         working-directory: server
         run: |
           echo "Downloading Assets.zip (not cached)..."
-          curl -sfL "$ASSETS_URL" -o Assets.zip
+          curl --http1.1 --fail --location --show-error \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            --continue-at - \
+            "$ASSETS_URL" -o Assets.zip
           ls -lh Assets.zip
 
       - name: Verify Assets
@@ -337,7 +341,11 @@ jobs:
         working-directory: server
         run: |
           echo "Downloading Assets.zip (not cached)..."
-          curl -sfL "$ASSETS_URL" -o Assets.zip
+          curl --http1.1 --fail --location --show-error \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            --continue-at - \
+            "$ASSETS_URL" -o Assets.zip
           ls -lh Assets.zip
 
       - name: Verify Assets
@@ -1402,7 +1410,11 @@ jobs:
         working-directory: server
         run: |
           echo "Downloading Assets.zip (not cached)..."
-          curl -sfL "$ASSETS_URL" -o Assets.zip
+          curl --http1.1 --fail --location --show-error \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            --continue-at - \
+            "$ASSETS_URL" -o Assets.zip
           ls -lh Assets.zip
 
       - name: Install Agent as Plugin (mods/ folder)
@@ -1573,7 +1585,11 @@ jobs:
         working-directory: server
         run: |
           echo "Downloading Assets.zip (not cached)..."
-          curl -sfL "$ASSETS_URL" -o Assets.zip
+          curl --http1.1 --fail --location --show-error \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            --continue-at - \
+            "$ASSETS_URL" -o Assets.zip
           ls -lh Assets.zip
 
       - name: Create Dummy Early Plugin Fixture
@@ -1780,7 +1796,11 @@ jobs:
         working-directory: server
         run: |
           echo "Downloading Assets.zip (not cached)..."
-          curl -sfL "$ASSETS_URL" -o Assets.zip
+          curl --http1.1 --fail --location --show-error \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            --continue-at - \
+            "$ASSETS_URL" -o Assets.zip
           ls -lh Assets.zip
 
       - name: Verify Assets
@@ -1997,7 +2017,11 @@ jobs:
         working-directory: server
         run: |
           echo "Downloading Assets.zip (not cached)..."
-          curl -sfL "$ASSETS_URL" -o Assets.zip
+          curl --http1.1 --fail --location --show-error \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            --continue-at - \
+            "$ASSETS_URL" -o Assets.zip
           ls -lh Assets.zip
 
       - name: Start Server In Early Plugin Mode
