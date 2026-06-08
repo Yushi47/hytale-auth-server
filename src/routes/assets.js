@@ -413,8 +413,11 @@ async function handleDownload(req, res, urlPath) {
     return;
   }
 
-  // Fallback: serve from local downloads directory
-  const filePath = path.join(config.downloadsDir, filename);
+  // Fallback: serve from local downloads directory. Assets.zip is the same file
+  // used by cosmetics/avatar APIs, so keep it tied to ASSETS_PATH.
+  const filePath = filename === 'Assets.zip'
+    ? config.assetsPath
+    : path.join(config.downloadsDir, filename);
 
   if (!fs.existsSync(filePath)) {
     sendJson(res, 404, { error: 'File not found and no CDN link configured' });
@@ -423,7 +426,6 @@ async function handleDownload(req, res, urlPath) {
 
   try {
     const stat = fs.statSync(filePath);
-    const content = fs.readFileSync(filePath);
 
     // Record download from local
     storage.recordDownload(filename, 'local');
@@ -436,13 +438,65 @@ async function handleDownload(req, res, urlPath) {
       contentType = 'application/zip';
     }
 
-    res.writeHead(200, {
+    const baseHeaders = {
       'Content-Type': contentType,
-      'Content-Length': stat.size,
       'Content-Disposition': `attachment; filename="${filename}"`,
-      'Cache-Control': 'public, max-age=3600'
+      'Cache-Control': 'public, max-age=300',
+      'Accept-Ranges': 'bytes'
+    };
+
+    const range = req.headers.range;
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) {
+        res.writeHead(416, {
+          ...baseHeaders,
+          'Content-Range': `bytes */${stat.size}`
+        });
+        res.end();
+        return;
+      }
+
+      let start = match[1] ? parseInt(match[1], 10) : 0;
+      let end = match[2] ? parseInt(match[2], 10) : stat.size - 1;
+      if (!match[1] && match[2]) {
+        const suffixLength = parseInt(match[2], 10);
+        start = Math.max(stat.size - suffixLength, 0);
+        end = stat.size - 1;
+      }
+
+      if (start > end || start >= stat.size) {
+        res.writeHead(416, {
+          ...baseHeaders,
+          'Content-Range': `bytes */${stat.size}`
+        });
+        res.end();
+        return;
+      }
+
+      end = Math.min(end, stat.size - 1);
+      res.writeHead(206, {
+        ...baseHeaders,
+        'Content-Length': end - start + 1,
+        'Content-Range': `bytes ${start}-${end}/${stat.size}`
+      });
+      if (req.method === 'HEAD') {
+        res.end();
+        return;
+      }
+      fs.createReadStream(filePath, { start, end }).pipe(res);
+      return;
+    }
+
+    res.writeHead(200, {
+      ...baseHeaders,
+      'Content-Length': stat.size
     });
-    res.end(content);
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    fs.createReadStream(filePath).pipe(res);
   } catch (e) {
     console.error('Download error:', e.message);
     sendJson(res, 500, { error: 'Failed to serve file' });

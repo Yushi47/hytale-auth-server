@@ -449,6 +449,14 @@ public class DualAuthHelper {
             } catch (Exception ignored) {
             }
 
+            // Skin field (IdentityTokenClaims) - used by player setup/avatar config.
+            try {
+                String skin = claims.getStringClaim("skin");
+                if (skin != null)
+                    setF(wrapper, "skin", skin);
+            } catch (Exception ignored) {
+            }
+
             // Audience (JWTClaims)
             try {
                 java.util.List<String> aud = claims.getAudience();

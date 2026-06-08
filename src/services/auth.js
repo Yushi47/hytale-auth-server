@@ -127,7 +127,7 @@ function normalizeScopes(scopes, defaultScope = DEFAULT_SCOPES) {
  * @param {string[]} [entitlements] - User entitlements
  * @param {string} [requestHost] - Request host for dynamic issuer
  */
-function generateIdentityToken(uuid, name, scopes = null, entitlements = ['game.base'], requestHost = null) {
+function generateIdentityToken(uuid, name, scopes = null, entitlements = ['game.base'], requestHost = null, extraClaims = {}) {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + config.sessionTtl;
   const scope = normalizeScopes(scopes);
@@ -141,6 +141,7 @@ function generateIdentityToken(uuid, name, scopes = null, entitlements = ['game.
     },
     entitlements: entitlements,
     scope: scope,
+    ...extraClaims,
     iat: now,
     exp: exp,
     iss: getIssuerUrl(requestHost),
@@ -183,7 +184,7 @@ function generateSessionToken(uuid, name = null, requestHost = null) {
  * @param {string[]|string} [scopes] - Requested scopes (defaults to 'hytale:server hytale:client')
  * @param {string} [requestHost] - Request host for dynamic issuer
  */
-function generateAuthorizationGrant(uuid, name, audience, scopes = null, requestHost = null) {
+function generateAuthorizationGrant(uuid, name, audience, scopes = null, requestHost = null, extraClaims = {}) {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + config.sessionTtl;
   const scope = normalizeScopes(scopes);
@@ -194,6 +195,7 @@ function generateAuthorizationGrant(uuid, name, audience, scopes = null, request
     username: name,
     aud: audience,
     scope: scope,
+    ...extraClaims,
     iat: now,
     exp: exp,
     iss: getIssuerUrl(requestHost),
@@ -210,7 +212,7 @@ function generateAuthorizationGrant(uuid, name, audience, scopes = null, request
  * @param {string[]|string} [scopes] - Requested scopes (defaults to 'hytale:server hytale:client')
  * @param {string} [requestHost] - Request host for dynamic issuer
  */
-function generateAccessToken(uuid, name, audience, certFingerprint = null, scopes = null, requestHost = null) {
+function generateAccessToken(uuid, name, audience, certFingerprint = null, scopes = null, requestHost = null, extraClaims = {}) {
   const now = Math.floor(Date.now() / 1000);
   const exp = now + config.sessionTtl;
   const scope = normalizeScopes(scopes);
@@ -222,6 +224,7 @@ function generateAccessToken(uuid, name, audience, certFingerprint = null, scope
     aud: audience,
     entitlements: ['game.base'],
     scope: scope,
+    ...extraClaims,
     iat: now,
     exp: exp,
     iss: getIssuerUrl(requestHost),

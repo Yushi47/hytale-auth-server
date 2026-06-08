@@ -107,11 +107,14 @@ function createRenderer(width, height) {
     THREE.ColorManagement.enabled = true;
   }
 
-  // Create headless WebGL context with high precision
+  // Create headless WebGL context with high precision and alpha support
   const glContext = createContext(width, height, {
     preserveDrawingBuffer: true,
     antialias: true,
-    precision: 'highp'  // Explicitly request high precision
+    alpha: true,           // Enable alpha channel for transparency
+    depth: true,           // Enable depth buffer for proper z-sorting
+    stencil: false,        // Not needed
+    precision: 'highp'     // Explicitly request high precision
   });
 
   if (!glContext) {
@@ -142,16 +145,16 @@ function createRenderer(width, height) {
 
   renderer.setSize(width, height);
 
-  // Match browser Three.js default settings
+  // FIX P2: Match browser Three.js default settings
   renderer.toneMapping = THREE.NoToneMapping;
   renderer.toneMappingExposure = 1.0;
 
-  // Use LINEAR output - we'll apply gamma correction manually after readPixels
-  // This ensures consistent results in headless-gl environment
-  if (THREE.LinearSRGBColorSpace) {
-    renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
+  // FIX P2: Use sRGB output directly - Three.js handles gamma internally
+  // This matches browser behavior and avoids incorrect manual gamma correction
+  if (THREE.SRGBColorSpace) {
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
   } else if (renderer.outputEncoding !== undefined) {
-    renderer.outputEncoding = THREE.LinearEncoding;
+    renderer.outputEncoding = THREE.sRGBEncoding;
   }
 
   return { renderer, glContext, mockCanvas };
@@ -216,10 +219,17 @@ async function loadTextureFromAsset(texturePath) {
 
 /**
  * Create a tinted texture from greyscale
+ * FIX P0: Normalize gradient path with Common/ prefix
+ * FIX P2: Remove * 2 multiplier that caused color overexposure
  */
 async function createTintedTexture(greyscalePath, baseColor, gradientPath = null) {
-  const buffer = assets.extractAsset(greyscalePath);
-  if (!buffer) return null;
+  // FIX P2: Normalize greyscale path
+  const normalizedGreyscale = greyscalePath.startsWith('Common/') ? greyscalePath : greyscalePath;
+  const buffer = assets.extractAsset(normalizedGreyscale);
+  if (!buffer) {
+    console.warn(`[NativeRenderer] Greyscale texture not found: ${normalizedGreyscale}`);
+    return null;
+  }
 
   try {
     const image = sharp(buffer);
@@ -229,13 +239,29 @@ async function createTintedTexture(greyscalePath, baseColor, gradientPath = null
       .toBuffer({ resolveWithObject: true });
 
     // Load gradient if provided
+    // FIX P0: Normalize gradient path and try multiple fallbacks
     let gradientData = null;
     if (gradientPath) {
-      const gradientBuffer = assets.extractAsset(gradientPath);
-      if (gradientBuffer) {
-        const gradient = sharp(gradientBuffer);
-        const gradientResult = await gradient.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-        gradientData = gradientResult.data;
+      // Try different path variations
+      const pathsToTry = [
+        gradientPath,
+        gradientPath.startsWith('Common/') ? gradientPath : `Common/${gradientPath}`,
+        // Try without Common/ prefix if it was already there
+        gradientPath.startsWith('Common/') ? gradientPath.replace('Common/', '') : gradientPath
+      ];
+
+      for (const pathToTry of pathsToTry) {
+        const gradientBuffer = assets.extractAsset(pathToTry);
+        if (gradientBuffer) {
+          const gradient = sharp(gradientBuffer);
+          const gradientResult = await gradient.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+          gradientData = gradientResult.data;
+          break;
+        }
+      }
+
+      if (!gradientData) {
+        console.warn(`[NativeRenderer] Gradient texture not found: ${gradientPath}`);
       }
     }
 
@@ -263,10 +289,11 @@ async function createTintedTexture(greyscalePath, baseColor, gradientPath = null
             g = gradientData[gradIdx + 1];
             b = gradientData[gradIdx + 2];
           } else if (color) {
+            // Simple tinting: greyscale modulates color brightness
             const t = grey / 255;
-            r = Math.round(Math.min(255, color.r * t * 2));
-            g = Math.round(Math.min(255, color.g * t * 2));
-            b = Math.round(Math.min(255, color.b * t * 2));
+            r = Math.round(color.r * t);
+            g = Math.round(color.g * t);
+            b = Math.round(color.b * t);
           } else {
             r = grey; g = grey; b = grey;
           }
@@ -307,6 +334,84 @@ async function createTintedTexture(greyscalePath, baseColor, gradientPath = null
     return texture;
   } catch (err) {
     console.error(`[NativeRenderer] Error creating tinted texture:`, err.message);
+    return null;
+  }
+}
+
+/**
+ * Create eye shadow texture from original eye texture
+ * Creates a semi-transparent shadow at the top of eye backgrounds
+ */
+async function createEyeShadowTexture(originalTexture) {
+  if (!originalTexture || !originalTexture.userData) return null;
+
+  try {
+    const texW = originalTexture.userData.width;
+    const texH = originalTexture.userData.height;
+
+    // Get the canvas from the original texture
+    const origCanvas = originalTexture.image;
+    if (!origCanvas) return null;
+
+    // Create new canvas for shadow texture
+    const canvas = createCanvas(texW, texH);
+    const ctx = canvas.getContext('2d');
+
+    // Copy original image
+    ctx.drawImage(origCanvas, 0, 0);
+    const imageData = ctx.getImageData(0, 0, texW, texH);
+    const data = imageData.data;
+
+    // Apply eye shadow effect (matching browser logic)
+    for (let y = 0; y < texH; y++) {
+      for (let x = 0; x < texW; x++) {
+        const idx = (y * texW + x) * 4;
+        const a = data[idx + 3];
+
+        if (y < 16 && a > 0) {
+          let localX = -1, localY = -1;
+          // Left eye region (1-14, 1-14)
+          if (x >= 1 && x < 15 && y >= 1 && y < 15) {
+            localX = x - 1;
+            localY = y - 1;
+          // Right eye region (17-30, 1-14)
+          } else if (x >= 17 && x < 31 && y >= 1 && y < 15) {
+            localX = x - 17;
+            localY = y - 1;
+          }
+
+          if (localX >= 0 && localY >= 0) {
+            // Create shadow gradient from top
+            let shadowAlpha = 0;
+            if (localY < 4) {
+              shadowAlpha = (1 - localY / 4) * 0.25;
+            }
+            data[idx] = 0;     // Black
+            data[idx + 1] = 0;
+            data[idx + 2] = 0;
+            data[idx + 3] = Math.round(shadowAlpha * 255 * (a / 255));
+          } else {
+            data[idx + 3] = 0; // Transparent outside eye regions
+          }
+        }
+      }
+    }
+
+    ctx.putImageData(imageData, 0, 0);
+
+    // Create Three.js texture
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.magFilter = THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    texture.generateMipmaps = false;
+    texture.userData = { width: texW, height: texH };
+    texture.needsUpdate = true;
+
+    return texture;
+  } catch (err) {
+    console.error('[NativeRenderer] Error creating eye shadow texture:', err.message);
     return null;
   }
 }
@@ -358,6 +463,8 @@ function getSkinToneGradientPath(tone) {
 
 /**
  * Create a box mesh from shape data
+ * FIX P2: Use MeshLambertMaterial for browser parity (Gouraud shading matches browser)
+ * FIX P1: depthWrite=true for all meshes to maintain proper depth sorting
  */
 function createBoxMesh(shape, color, texture = null, nodeName = '') {
   const settings = shape.settings;
@@ -383,34 +490,27 @@ function createBoxMesh(shape, color, texture = null, nodeName = '') {
     applyBoxUVs(geometry, shape, texture);
   }
 
-  // Determine if we need double-sided rendering
-  const modelDoubleSided = shape.doubleSided === true;
-  const needsDoubleSide = modelDoubleSided || flipX || flipY || flipZ;
-
   // Body parts use solid materials, cosmetics use transparent with alpha clipping
   const isBodyPart = ['Neck', 'Head', 'Chest', 'Belly', 'Pelvis'].includes(nodeName) ||
                      nodeName.includes('Arm') || nodeName.includes('Leg') ||
                      nodeName.includes('Hand') || nodeName.includes('Foot') ||
                      nodeName.includes('Thigh') || nodeName.includes('Calf');
 
+  // MeshLambertMaterial for proper lighting interaction
   let material;
   if (texture) {
-    material = new THREE.MeshStandardMaterial({
+    material = new THREE.MeshLambertMaterial({
       map: texture,
       color: 0xffffff,
-      alphaTest: 0.5,           // Sharp edges, discards semi-transparent pixels
-      transparent: true,         // Required for alpha to work
-      side: THREE.DoubleSide,    // See back of hair/neck
-      depthWrite: !isBodyPart ? false : true,  // Prevent black ghost artifacts on cosmetics
-      roughness: 0.5,            // Smoother for more "pop"
-      metalness: 0.0
+      alphaTest: 0.1,
+      transparent: true,
+      side: THREE.DoubleSide,
+      depthWrite: true
     });
   } else {
-    material = new THREE.MeshStandardMaterial({
+    material = new THREE.MeshLambertMaterial({
       color: color,
-      side: THREE.DoubleSide,
-      roughness: 0.5,
-      metalness: 0.0
+      side: THREE.DoubleSide
     });
   }
 
@@ -425,6 +525,7 @@ function createBoxMesh(shape, color, texture = null, nodeName = '') {
 
 /**
  * Apply UV mapping to box geometry
+ * FIX: Added angle rotation and mirror support to match browser version
  */
 function applyBoxUVs(geometry, shape, texture) {
   const texW = texture.userData?.width || 64;
@@ -444,6 +545,9 @@ function applyBoxUVs(geometry, shape, texture) {
     const layout = shape.textureLayout[faceName];
 
     if (layout && layout.offset) {
+      const angle = layout.angle || 0;
+
+      // Calculate base UV size based on face orientation
       let uv_size = [0, 0];
       if (faceName === 'left' || faceName === 'right') {
         uv_size = [pixelD, pixelH];
@@ -453,17 +557,99 @@ function applyBoxUVs(geometry, shape, texture) {
         uv_size = [pixelW, pixelH];
       }
 
+      // Handle mirror (matching browser logic)
+      let uv_mirror = [
+        layout.mirror?.x ? -1 : 1,
+        layout.mirror?.y ? -1 : 1
+      ];
+
       const uv_offset = [layout.offset.x, layout.offset.y];
-      const u1 = uv_offset[0] / texW;
-      const v1 = 1.0 - uv_offset[1] / texH;
-      const u2 = (uv_offset[0] + uv_size[0]) / texW;
-      const v2 = 1.0 - (uv_offset[1] + uv_size[1]) / texH;
+
+      // Calculate UV coordinates based on angle (matching browser/Blockbench plugin logic)
+      let result;
+      switch (angle) {
+        case 90:
+          // Swap size and mirror, flip mirror X
+          [uv_size[0], uv_size[1]] = [uv_size[1], uv_size[0]];
+          [uv_mirror[0], uv_mirror[1]] = [uv_mirror[1], uv_mirror[0]];
+          uv_mirror[0] *= -1;
+          result = [
+            uv_offset[0],
+            uv_offset[1] + uv_size[1] * uv_mirror[1],
+            uv_offset[0] + uv_size[0] * uv_mirror[0],
+            uv_offset[1]
+          ];
+          break;
+        case 180:
+          // Flip both mirrors
+          uv_mirror[0] *= -1;
+          uv_mirror[1] *= -1;
+          result = [
+            uv_offset[0] + uv_size[0] * uv_mirror[0],
+            uv_offset[1] + uv_size[1] * uv_mirror[1],
+            uv_offset[0],
+            uv_offset[1]
+          ];
+          break;
+        case 270:
+          // Swap size and mirror, flip mirror Y
+          [uv_size[0], uv_size[1]] = [uv_size[1], uv_size[0]];
+          [uv_mirror[0], uv_mirror[1]] = [uv_mirror[1], uv_mirror[0]];
+          uv_mirror[1] *= -1;
+          result = [
+            uv_offset[0] + uv_size[0] * uv_mirror[0],
+            uv_offset[1],
+            uv_offset[0],
+            uv_offset[1] + uv_size[1] * uv_mirror[1]
+          ];
+          break;
+        default: // 0 degrees
+          result = [
+            uv_offset[0],
+            uv_offset[1],
+            uv_offset[0] + uv_size[0] * uv_mirror[0],
+            uv_offset[1] + uv_size[1] * uv_mirror[1]
+          ];
+          break;
+      }
+
+      // Convert pixel coordinates to normalized UV (0-1) with Y flip for WebGL
+      const u1 = result[0] / texW;
+      const v1 = 1.0 - result[1] / texH;
+      const u2 = result[2] / texW;
+      const v2 = 1.0 - result[3] / texH;
+
+      // FIX P2: Validate UV coordinates - NaN check
+      if (isNaN(u1) || isNaN(v1) || isNaN(u2) || isNaN(v2)) {
+        console.warn(`[NativeRenderer] Invalid UV coordinates for face ${faceName}, using defaults`);
+        continue;
+      }
 
       const baseIdx = faceIdx * 4 * 2;
-      uvArray[baseIdx + 0] = u1; uvArray[baseIdx + 1] = v1;
-      uvArray[baseIdx + 2] = u2; uvArray[baseIdx + 3] = v1;
-      uvArray[baseIdx + 4] = u1; uvArray[baseIdx + 5] = v2;
-      uvArray[baseIdx + 6] = u2; uvArray[baseIdx + 7] = v2;
+
+      // Apply the rotation to the UV assignment based on angle (matching browser)
+      if (angle === 90) {
+        uvArray[baseIdx + 0] = u1; uvArray[baseIdx + 1] = v2;
+        uvArray[baseIdx + 2] = u1; uvArray[baseIdx + 3] = v1;
+        uvArray[baseIdx + 4] = u2; uvArray[baseIdx + 5] = v2;
+        uvArray[baseIdx + 6] = u2; uvArray[baseIdx + 7] = v1;
+      } else if (angle === 180) {
+        uvArray[baseIdx + 0] = u2; uvArray[baseIdx + 1] = v2;
+        uvArray[baseIdx + 2] = u1; uvArray[baseIdx + 3] = v2;
+        uvArray[baseIdx + 4] = u2; uvArray[baseIdx + 5] = v1;
+        uvArray[baseIdx + 6] = u1; uvArray[baseIdx + 7] = v1;
+      } else if (angle === 270) {
+        uvArray[baseIdx + 0] = u2; uvArray[baseIdx + 1] = v1;
+        uvArray[baseIdx + 2] = u2; uvArray[baseIdx + 3] = v2;
+        uvArray[baseIdx + 4] = u1; uvArray[baseIdx + 5] = v1;
+        uvArray[baseIdx + 6] = u1; uvArray[baseIdx + 7] = v2;
+      } else {
+        // No rotation (default)
+        uvArray[baseIdx + 0] = u1; uvArray[baseIdx + 1] = v1;
+        uvArray[baseIdx + 2] = u2; uvArray[baseIdx + 3] = v1;
+        uvArray[baseIdx + 4] = u1; uvArray[baseIdx + 5] = v2;
+        uvArray[baseIdx + 6] = u2; uvArray[baseIdx + 7] = v2;
+      }
     }
   }
   uvAttr.needsUpdate = true;
@@ -583,41 +769,49 @@ function createQuadMesh(shape, color, texture = null, nodeName = '') {
       const u2 = result[2] / texW;
       const v2 = 1.0 - result[3] / texH;
 
-      // PlaneGeometry UV vertex order: bottom-left, bottom-right, top-left, top-right
-      let newUVs;
-      if (angle === 90) {
-        newUVs = new Float32Array([u1, v2, u1, v1, u2, v2, u2, v1]);
-      } else if (angle === 180) {
-        newUVs = new Float32Array([u2, v2, u1, v2, u2, v1, u1, v1]);
-      } else if (angle === 270) {
-        newUVs = new Float32Array([u2, v1, u2, v2, u1, v1, u1, v2]);
+      // FIX P2: Validate UV coordinates - NaN check
+      if (isNaN(u1) || isNaN(v1) || isNaN(u2) || isNaN(v2)) {
+        console.warn(`[NativeRenderer] Invalid quad UV coordinates for ${nodeName}, using defaults`);
       } else {
-        newUVs = new Float32Array([u1, v1, u2, v1, u1, v2, u2, v2]);
-      }
+        // PlaneGeometry UV vertex order: bottom-left, bottom-right, top-left, top-right
+        let newUVs;
+        if (angle === 90) {
+          newUVs = new Float32Array([u1, v2, u1, v1, u2, v2, u2, v1]);
+        } else if (angle === 180) {
+          newUVs = new Float32Array([u2, v2, u1, v2, u2, v1, u1, v1]);
+        } else if (angle === 270) {
+          newUVs = new Float32Array([u2, v1, u2, v2, u1, v1, u1, v2]);
+        } else {
+          newUVs = new Float32Array([u1, v1, u2, v1, u1, v2, u2, v2]);
+        }
 
-      geometry.setAttribute('uv', new THREE.BufferAttribute(newUVs, 2));
+        geometry.setAttribute('uv', new THREE.BufferAttribute(newUVs, 2));
+      }
     }
   }
 
+  // MeshLambertMaterial for proper lighting
+  // FIX: Facial overlays (Eyes, Eyebrows, Face, Mouth) should NOT write depth
+  const isFacialOverlay = nodeName.includes('Eye') ||
+                          nodeName.includes('Eyebrow') ||
+                          nodeName.includes('Face') ||
+                          nodeName.includes('Mouth');
+
   let material;
   if (texture) {
-    material = new THREE.MeshStandardMaterial({
+    material = new THREE.MeshLambertMaterial({
       map: texture,
       color: 0xffffff,
-      alphaTest: 0.5,
+      alphaTest: isFacialOverlay ? 0.05 : 0.1,
       transparent: true,
       side: THREE.DoubleSide,
-      depthWrite: false,    // Quads are typically overlays, prevent black artifacts
-      depthTest: true,
-      roughness: 0.5,
-      metalness: 0.0
+      depthWrite: !isFacialOverlay,
+      depthTest: true
     });
   } else {
-    material = new THREE.MeshStandardMaterial({
+    material = new THREE.MeshLambertMaterial({
       color: color,
-      side: THREE.DoubleSide,
-      roughness: 0.5,
-      metalness: 0.0
+      side: THREE.DoubleSide
     });
   }
 
@@ -705,9 +899,62 @@ function renderPlayerNode(node, parent, skinColor, bodyTexture, hiddenParts = ne
 }
 
 /**
- * Render a cosmetic node recursively
+ * Apply OIT (Order-Independent Transparency) sorting to scene
+ * Sorts transparent meshes back-to-front by distance to camera
  */
-function renderCosmeticNode(node, parent, character, color, texture = null, partType = '', zOffset = 0) {
+function applyOITSorting(scene, camera) {
+  const cameraWorldPos = new THREE.Vector3();
+  camera.getWorldPosition(cameraWorldPos);
+
+  const transparentMeshes = [];
+  const opaqueMeshes = [];
+
+  scene.traverse((object) => {
+    if (!object.isMesh || !object.visible) return;
+    if (!object.material) return;
+
+    const mat = object.material;
+    const isTransparent = object.userData.oitTransparent === true ||
+      (mat.transparent === true && (mat.opacity < 1 || mat.alphaTest === 0));
+
+    if (isTransparent) {
+      const worldPos = new THREE.Vector3();
+      object.getWorldPosition(worldPos);
+      const distance = worldPos.distanceTo(cameraWorldPos);
+      transparentMeshes.push({ mesh: object, distance });
+    } else {
+      opaqueMeshes.push(object);
+    }
+  });
+
+  // Sort transparent meshes back-to-front (furthest first)
+  transparentMeshes.sort((a, b) => b.distance - a.distance);
+
+  // Opaque meshes render first (low render order)
+  for (const mesh of opaqueMeshes) {
+    mesh.renderOrder = 0;
+  }
+
+  // Transparent meshes render after opaque, in back-to-front order
+  let renderOrder = 1000;
+  for (const item of transparentMeshes) {
+    item.mesh.renderOrder = renderOrder++;
+    // Ensure proper transparency settings
+    item.mesh.material.transparent = true;
+    item.mesh.material.depthWrite = false;
+    item.mesh.material.depthTest = true;
+  }
+
+  return transparentMeshes.length;
+}
+
+/**
+ * Render a cosmetic node recursively
+ * FIX P0: Properly apply zOffset as local position for attached bones
+ * FIX P0: Set explicit renderOrder for facial cosmetics layering
+ * FIX: Added eyeShadowTexture for proper eye rendering
+ */
+function renderCosmeticNode(node, parent, character, color, texture = null, partType = '', zOffset = 0, eyeShadowTexture = null) {
   const nodeName = node.name || node.id || '';
 
   let targetParent = parent;
@@ -725,6 +972,7 @@ function renderCosmeticNode(node, parent, character, color, texture = null, part
   group.name = nodeName + '_cosmetic';
 
   if (attachedToPlayerBone) {
+    // FIX P0: Apply orientation from cosmetic node
     if (node.orientation) {
       group.quaternion.set(
         node.orientation.x ?? 0,
@@ -733,38 +981,77 @@ function renderCosmeticNode(node, parent, character, color, texture = null, part
         node.orientation.w ?? 1
       );
     }
+    // FIX P0: Apply zOffset as local Z position (bone provides XY position)
+    // This ensures facial cosmetics layer correctly even when attached to bones
+    if (zOffset) {
+      group.position.set(0, 0, zOffset);
+    }
   } else {
     applyTransform(group, node);
-  }
-
-  // Apply zOffset to prevent z-fighting
-  if (zOffset) {
-    group.position.z += zOffset;
+    // Apply zOffset on top of existing position for non-attached nodes
+    if (zOffset) {
+      group.position.z += zOffset;
+    }
   }
 
   if (node.shape && node.shape.visible !== false && node.shape.type !== 'none') {
     let mesh = null;
+
+    // DEBUG: Log shape data for face cosmetics
+    if (['face', 'eyes', 'eyebrows', 'mouth', 'facialHair'].includes(partType)) {
+      console.log(`[SSR DEBUG] ${partType}/${nodeName}: type=${node.shape.type}, hasTexture=${!!texture}, hasTextureLayout=${!!node.shape.textureLayout}, settings=${JSON.stringify(node.shape.settings)}`);
+    }
+
     if (node.shape.type === 'box') {
       mesh = createBoxMesh(node.shape, color, texture, nodeName);
     } else if (node.shape.type === 'quad') {
-      mesh = createQuadMesh(node.shape, color, texture, nodeName);
-      // Set render order for proper layering
-      if (mesh) {
-        if (partType === 'eyes') {
-          if (nodeName.includes('Background')) {
-            mesh.renderOrder = 100;
-            mesh.material.transparent = true;
-            mesh.material.depthWrite = false;
-          } else if (nodeName.includes('Eye') && !nodeName.includes('Attachment')) {
-            mesh.renderOrder = 101;
-          }
-        } else if (partType === 'mouth') {
-          mesh.renderOrder = 99;
-        } else if (partType === 'face') {
-          mesh.renderOrder = 98;
+      // FIX: Use eye shadow texture for eye background (matching browser)
+      if (partType === 'eyes' && nodeName.includes('Background') && eyeShadowTexture) {
+        mesh = createQuadMesh(node.shape, color, eyeShadowTexture, nodeName);
+        // Set proper OIT material properties for eye background
+        if (mesh) {
+          mesh.renderOrder = 100;
+          mesh.material.transparent = true;
+          mesh.material.depthWrite = true;
+          mesh.material.alphaTest = 0;
+          mesh.userData.oitTransparent = true;
         }
+      } else {
+        mesh = createQuadMesh(node.shape, color, texture, nodeName);
       }
     }
+
+    // FIX P0: Set explicit renderOrder for ALL facial cosmetics based on partType
+    // Higher renderOrder = renders later = appears in front
+    if (mesh) {
+      if (partType === 'face') {
+        mesh.renderOrder = 100;
+      } else if (partType === 'facialHair') {
+        mesh.renderOrder = 102;  // > face so beard appears in front
+      } else if (partType === 'mouth') {
+        mesh.renderOrder = 104;
+      } else if (partType === 'eyes') {
+        // FIX P1: OIT layer ordering for eye components
+        if (nodeName.includes('Background')) {
+          // Already handled above with eyeShadowTexture
+          mesh.renderOrder = 105;
+          mesh.material.depthWrite = false;  // Background doesn't write depth
+          mesh.userData.oitTransparent = true;
+          mesh.userData.oitLayer = 0;  // Back layer
+        } else if (nodeName.includes('Eye') && !nodeName.includes('Attachment')) {
+          mesh.renderOrder = 106;
+          mesh.material.depthWrite = true;   // Pupil writes depth
+          mesh.userData.oitTransparent = true;
+          mesh.userData.oitLayer = 1;  // Front layer
+        }
+      } else if (partType === 'eyebrows') {
+        mesh.renderOrder = 108;
+      } else if (partType === 'haircut') {
+        mesh.renderOrder = 50;  // Below face cosmetics
+      }
+      mesh.material.transparent = true;
+    }
+
     if (mesh) group.add(mesh);
   }
 
@@ -775,10 +1062,10 @@ function renderCosmeticNode(node, parent, character, color, texture = null, part
       const childName = child.name || child.id || '';
       const childBone = character.getObjectByName(childName);
       if (childBone) {
-        renderCosmeticNode(child, childBone, character, color, texture, partType, zOffset);
+        renderCosmeticNode(child, childBone, character, color, texture, partType, zOffset, eyeShadowTexture);
       } else {
         // Don't apply zOffset again for nested children (already applied at top level)
-        renderCosmeticNode(child, group, character, color, texture, partType, 0);
+        renderCosmeticNode(child, group, character, color, texture, partType, 0, eyeShadowTexture);
       }
     }
   }
@@ -809,10 +1096,8 @@ async function buildCharacter(modelData, character) {
     hiddenParts.add('L-Foot');
     hiddenParts.add('R-Foot');
   }
-  if (modelData.parts?.haircut) {
-    hiddenParts.add('HeadTop');
-    hiddenParts.add('HairBase');
-  }
+  // Note: 'HeadTop' and 'HairBase' don't exist in Player.blockymodel
+  // Haircuts are separate cosmetic models that attach to the Head bone
 
   // Load player base model
   try {
@@ -839,6 +1124,7 @@ async function buildCharacter(modelData, character) {
   }
 
   // Cosmetics render order with zOffset (matching browser version)
+  // Order matters: face cosmetics render in this order, with higher zOffset = closer to camera
   const cosmeticOrder = [
     { key: 'underwear', zOffset: 0 },
     { key: 'pants', zOffset: 0.001 },
@@ -847,21 +1133,33 @@ async function buildCharacter(modelData, character) {
     { key: 'undertop', zOffset: 0.001 },
     { key: 'overtop', zOffset: 0.002 },
     { key: 'gloves', zOffset: 0.001 },
-    { key: 'face', zOffset: 0.01 },
-    { key: 'mouth', zOffset: 0.015 },
-    { key: 'eyes', zOffset: 0.02 },
-    { key: 'eyebrows', zOffset: 0.025 },
     { key: 'ears', zOffset: 0 },
+    { key: 'face', zOffset: 0.01 },
+    { key: 'facialHair', zOffset: 0.02 },  // AFTER face, higher zOffset so beard renders in front
+    { key: 'mouth', zOffset: 0.025 },
+    { key: 'eyes', zOffset: 0.03 },
+    { key: 'eyebrows', zOffset: 0.035 },
     { key: 'haircut', zOffset: 0.005 },
-    { key: 'facialHair', zOffset: 0.004 },
     { key: 'headAccessory', zOffset: 0.006 },
-    { key: 'faceAccessory', zOffset: 0.005 },
+    { key: 'faceAccessory', zOffset: 0.015 },
     { key: 'earAccessory', zOffset: 0.001 },
     { key: 'cape', zOffset: -0.001 }
   ];
 
   for (const { key, zOffset } of cosmeticOrder) {
     const part = modelData.parts?.[key];
+
+    // Debug logging for cosmetic loading
+    if (key === 'haircut' || key === 'facialHair') {
+      console.log(`[NativeRenderer] Processing ${key}:`, {
+        partExists: !!part,
+        hasModel: !!part?.model,
+        model: part?.model,
+        greyscaleTexture: part?.greyscaleTexture,
+        texture: part?.texture
+      });
+    }
+
     if (part && part.model) {
       // Normalize baseColor (can be string, number, or array)
       let rawBaseColor = part.baseColor;
@@ -888,8 +1186,12 @@ async function buildCharacter(modelData, character) {
       let texture = null;
       const isSkinPart = part.gradientSet === 'Skin' || ['face', 'ears', 'mouth'].includes(key);
 
+      // DEBUG: Log texture loading paths
+      console.log(`[SSR TEXTURE] ${key}: texture=${part.texture}, greyscale=${part.greyscaleTexture}, gradientTexture=${part.gradientTexture}, isSkinPart=${isSkinPart}`);
+
       if (part.texture) {
         texture = await loadTextureFromAsset(part.texture);
+        console.log(`[SSR TEXTURE] ${key}: Direct texture loaded = ${!!texture}`);
       } else if (part.greyscaleTexture) {
         let gradientPath = part.gradientTexture;
         let baseCol = rawBaseColor;
@@ -899,7 +1201,18 @@ async function buildCharacter(modelData, character) {
           baseCol = skinColorHex;
         }
 
+        console.log(`[SSR TEXTURE] ${key}: Creating tinted texture - greyscale=${part.greyscaleTexture}, gradient=${gradientPath}, baseCol=${baseCol}`);
         texture = await createTintedTexture(part.greyscaleTexture, baseCol, gradientPath);
+        console.log(`[SSR TEXTURE] ${key}: Tinted texture created = ${!!texture}`);
+      } else {
+        console.log(`[SSR TEXTURE] ${key}: No texture path provided!`);
+      }
+
+      // Create eye shadow texture for eyes (matching browser behavior)
+      let eyeShadowTexture = null;
+      if (key === 'eyes' && texture) {
+        eyeShadowTexture = await createEyeShadowTexture(texture);
+        console.log(`[SSR TEXTURE] ${key}: Eye shadow texture created = ${!!eyeShadowTexture}`);
       }
 
       try {
@@ -909,10 +1222,20 @@ async function buildCharacter(modelData, character) {
         if (modelBuffer) {
           const model = JSON.parse(modelBuffer.toString());
           if (model.nodes) {
+            if (key === 'haircut' || key === 'facialHair' || key === 'eyes') {
+              console.log(`[NativeRenderer] Loaded ${key} model from ${modelPath}:`, {
+                nodeCount: model.nodes.length,
+                rootNodeNames: model.nodes.map(n => n.name || n.id),
+                hasTexture: !!texture,
+                hasEyeShadow: !!eyeShadowTexture
+              });
+            }
             for (const node of model.nodes) {
-              renderCosmeticNode(node, character, character, color, texture, key, zOffset);
+              renderCosmeticNode(node, character, character, color, texture, key, zOffset, eyeShadowTexture);
             }
           }
+        } else {
+          console.warn(`[NativeRenderer] Model not found: ${modelPath}`);
         }
       } catch (err) {
         console.error(`[NativeRenderer] Error loading cosmetic ${key}:`, err.message);
@@ -1025,19 +1348,18 @@ async function renderHead(uuid, bgColor = 'black', width = 200, height = 200) {
   camera.position.set(0, 1.1, -1.0);
   camera.lookAt(0, 1.0, 0);
 
-  // Lighting - HemisphereLight provides omni-directional fill (fixes black neck/undersides)
-  // Sky color (top) is bright white, ground color (bottom) is soft gray
-  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x222222, 1.0);
+  // FIX: In-Game Lighting Model (Bright, Vibrant, matches game)
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
   hemiLight.position.set(0, 20, 0);
   scene.add(hemiLight);
 
   // Main key light (front/top)
-  const frontLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  const frontLight = new THREE.DirectionalLight(0xffffff, 0.6);
   frontLight.position.set(10, 20, 20);
   scene.add(frontLight);
 
   // Rim/back light (separates head from background)
-  const backLight = new THREE.DirectionalLight(0xffffff, 0.8);
+  const backLight = new THREE.DirectionalLight(0xffffff, 0.4);
   backLight.position.set(-5, 5, -10);
   scene.add(backLight);
 
@@ -1052,6 +1374,11 @@ async function renderHead(uuid, bgColor = 'black', width = 200, height = 200) {
   await buildCharacter(modelData, character);
   timings.buildEnd = Date.now();
 
+  // Apply OIT sorting for proper transparency rendering
+  timings.oitStart = Date.now();
+  const transparentCount = applyOITSorting(scene, camera);
+  timings.oitEnd = Date.now();
+
   // Render
   timings.render = Date.now();
   renderer.render(scene, camera);
@@ -1062,16 +1389,9 @@ async function renderHead(uuid, bgColor = 'black', width = 200, height = 200) {
   const pixels = new Uint8Array(width * height * 4);
   glContext.readPixels(0, 0, width, height, glContext.RGBA, glContext.UNSIGNED_BYTE, pixels);
 
-  // Apply gamma correction (Linear to sRGB)
-  // Renderer outputs in Linear space, we manually convert to sRGB for correct display
-  // This ensures consistent results in headless-gl environment
-  const gamma = 1 / 2.2;
-  for (let i = 0; i < pixels.length; i += 4) {
-    pixels[i] = Math.round(Math.pow(pixels[i] / 255, gamma) * 255);     // R
-    pixels[i + 1] = Math.round(Math.pow(pixels[i + 1] / 255, gamma) * 255); // G
-    pixels[i + 2] = Math.round(Math.pow(pixels[i + 2] / 255, gamma) * 255); // B
-    // Alpha stays the same (pixels[i + 3])
-  }
+  // FIX P2: Removed manual gamma correction
+  // Three.js now outputs in sRGB space directly (configured in createRenderer)
+  // This avoids the washed-out colors caused by incorrect gamma curve
 
   // Flip vertically (OpenGL is bottom-up)
   const flipped = new Uint8Array(width * height * 4);
@@ -1100,6 +1420,351 @@ async function renderHead(uuid, bgColor = 'black', width = 200, height = 200) {
       dataLoad: timings.dataEnd - timings.dataStart,
       renderSetup: timings.renderSetupEnd - timings.renderSetup,
       characterBuild: timings.buildEnd - timings.buildStart,
+      oitSort: timings.oitEnd - timings.oitStart,
+      render: timings.renderEnd - timings.render,
+      extract: timings.extractEnd - timings.extractStart
+    }
+  };
+}
+
+/**
+ * Render an avatar head from direct skin data (for mock/test skins)
+ * @param {Object} skinData - Raw skin data (haircut, eyes, face, etc.)
+ * @param {string} bgColor - Background color
+ * @param {number} width - Image width
+ * @param {number} height - Image height
+ */
+async function renderHeadFromSkinData(skinData, bgColor = 'black', width = 200, height = 200) {
+  if (!isAvailable()) {
+    throw new Error('Native renderer not available');
+  }
+
+  const startTime = Date.now();
+  const timings = {};
+
+  timings.dataStart = Date.now();
+
+  // Resolve model data from skin
+  const configs = assets.loadCosmeticConfigs();
+  const gradientSets = assets.loadGradientSets();
+
+  if (!configs) {
+    throw new Error('Could not load cosmetic configs');
+  }
+
+  const resolvedParts = {};
+  const categories = [
+    'haircut', 'pants', 'overtop', 'undertop', 'shoes',
+    'headAccessory', 'faceAccessory', 'earAccessory',
+    'eyebrows', 'eyes', 'face', 'facialHair', 'gloves',
+    'cape', 'overpants', 'mouth', 'ears', 'underwear'
+  ];
+
+  for (const category of categories) {
+    if (skinData[category]) {
+      const resolved = assets.resolveSkinPart(category, skinData[category], configs, gradientSets);
+      if (resolved) {
+        resolvedParts[category] = resolved;
+      }
+    }
+  }
+
+  // Parse body characteristic
+  let bodyType = 'Regular';
+  let skinTone = '01';
+  let skinToneFromBody = false;
+
+  if (skinData.bodyCharacteristic) {
+    const bodyParts = skinData.bodyCharacteristic.split('.');
+    bodyType = bodyParts[0] || 'Regular';
+    if (bodyParts.length > 1 && bodyParts[1]) {
+      skinTone = bodyParts[1].padStart(2, '0');
+      skinToneFromBody = true;
+    }
+  }
+
+  if (!skinToneFromBody && skinData.skinTone) {
+    const toneParts = skinData.skinTone.split('.');
+    const toneValue = toneParts.length > 1 ? toneParts[1] : toneParts[0];
+    if (toneValue && toneValue !== 'Default') {
+      skinTone = toneValue.padStart(2, '0');
+    }
+  }
+
+  const modelData = {
+    uuid: 'mock-' + Date.now(),
+    skinTone,
+    bodyType,
+    parts: resolvedParts
+  };
+  timings.dataEnd = Date.now();
+
+  // Create renderer
+  timings.renderSetup = Date.now();
+  const { renderer, glContext } = createRenderer(width, height);
+
+  // Create scene
+  const scene = new THREE.Scene();
+
+  // Parse background color
+  if (bgColor === 'transparent') {
+    scene.background = null;
+    renderer.setClearColor(0x000000, 0);
+  } else if (bgColor === 'white') {
+    scene.background = new THREE.Color(0xffffff);
+    renderer.setClearColor(0xffffff, 1);
+  } else if (bgColor === 'black') {
+    scene.background = new THREE.Color(0x000000);
+    renderer.setClearColor(0x000000, 1);
+  } else if (bgColor.startsWith('#')) {
+    const hexColor = parseInt(bgColor.slice(1), 16);
+    scene.background = new THREE.Color(hexColor);
+    renderer.setClearColor(hexColor, 1);
+  }
+
+  // Camera setup for head view
+  const camera = new THREE.PerspectiveCamera(40, width / height, 0.1, 100);
+  camera.position.set(0, 1.1, -1.0);
+  camera.lookAt(0, 1.0, 0);
+
+  // FIX: In-Game Lighting Model (Bright, Vibrant, matches game)
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+  hemiLight.position.set(0, 20, 0);
+  scene.add(hemiLight);
+
+  const frontLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  frontLight.position.set(10, 20, 20);
+  scene.add(frontLight);
+
+  const backLight = new THREE.DirectionalLight(0xffffff, 0.4);
+  backLight.position.set(-5, 5, -10);
+  scene.add(backLight);
+
+  // Character group
+  const character = new THREE.Group();
+  character.rotation.y = Math.PI;
+  scene.add(character);
+  timings.renderSetupEnd = Date.now();
+
+  // Build character
+  timings.buildStart = Date.now();
+  await buildCharacter(modelData, character);
+  timings.buildEnd = Date.now();
+
+  // Apply OIT sorting
+  timings.oitStart = Date.now();
+  applyOITSorting(scene, camera);
+  timings.oitEnd = Date.now();
+
+  // Render
+  timings.render = Date.now();
+  renderer.render(scene, camera);
+  timings.renderEnd = Date.now();
+
+  // Extract pixels
+  timings.extractStart = Date.now();
+  const pixels = new Uint8Array(width * height * 4);
+  glContext.readPixels(0, 0, width, height, glContext.RGBA, glContext.UNSIGNED_BYTE, pixels);
+
+  // Note: No manual gamma correction needed - Three.js handles sRGB output via outputColorSpace
+
+  // Flip vertically
+  const flipped = new Uint8Array(width * height * 4);
+  const rowSize = width * 4;
+  for (let y = 0; y < height; y++) {
+    const srcRow = y * rowSize;
+    const dstRow = (height - 1 - y) * rowSize;
+    flipped.set(pixels.subarray(srcRow, srcRow + rowSize), dstRow);
+  }
+
+  // Convert to PNG
+  const pngBuffer = await sharp(Buffer.from(flipped), {
+    raw: { width, height, channels: 4 }
+  }).png().toBuffer();
+  timings.extractEnd = Date.now();
+
+  // Cleanup
+  renderer.dispose();
+
+  const totalTime = Date.now() - startTime;
+
+  return {
+    buffer: pngBuffer,
+    timings: {
+      total: totalTime,
+      dataLoad: timings.dataEnd - timings.dataStart,
+      renderSetup: timings.renderSetupEnd - timings.renderSetup,
+      characterBuild: timings.buildEnd - timings.buildStart,
+      oitSort: timings.oitEnd - timings.oitStart,
+      render: timings.renderEnd - timings.render,
+      extract: timings.extractEnd - timings.extractStart
+    }
+  };
+}
+
+/**
+ * Render full body from skin data (for testing body cosmetics)
+ */
+async function renderFullBodyFromSkinData(skinData, bgColor = 'black', width = 400, height = 600) {
+  if (!isAvailable()) {
+    throw new Error('Native renderer not available');
+  }
+
+  const startTime = Date.now();
+  const timings = {};
+
+  timings.dataStart = Date.now();
+
+  // Resolve model data from skin (same as renderHeadFromSkinData)
+  const configs = assets.loadCosmeticConfigs();
+  const gradientSets = assets.loadGradientSets();
+
+  if (!configs) {
+    throw new Error('Could not load cosmetic configs');
+  }
+
+  const resolvedParts = {};
+  const categories = [
+    'haircut', 'pants', 'overtop', 'undertop', 'shoes',
+    'headAccessory', 'faceAccessory', 'earAccessory',
+    'eyebrows', 'eyes', 'face', 'facialHair', 'gloves',
+    'cape', 'overpants', 'mouth', 'ears', 'underwear'
+  ];
+
+  for (const category of categories) {
+    if (skinData[category]) {
+      const resolved = assets.resolveSkinPart(category, skinData[category], configs, gradientSets);
+      if (resolved) {
+        resolvedParts[category] = resolved;
+      }
+    }
+  }
+
+  // Parse body characteristic
+  let bodyType = 'Regular';
+  let skinTone = '01';
+  let skinToneFromBody = false;
+
+  if (skinData.bodyCharacteristic) {
+    const bodyParts = skinData.bodyCharacteristic.split('.');
+    bodyType = bodyParts[0] || 'Regular';
+    if (bodyParts.length > 1 && bodyParts[1]) {
+      skinTone = bodyParts[1].padStart(2, '0');
+      skinToneFromBody = true;
+    }
+  }
+
+  if (!skinToneFromBody && skinData.skinTone) {
+    const toneParts = skinData.skinTone.split('.');
+    const toneValue = toneParts.length > 1 ? toneParts[1] : toneParts[0];
+    if (toneValue && toneValue !== 'Default') {
+      skinTone = toneValue.padStart(2, '0');
+    }
+  }
+
+  const modelData = {
+    uuid: 'mock-fullbody-' + Date.now(),
+    skinTone,
+    bodyType,
+    parts: resolvedParts
+  };
+  timings.dataEnd = Date.now();
+
+  // Create renderer
+  timings.renderSetup = Date.now();
+  const { renderer, glContext } = createRenderer(width, height);
+
+  // Create scene
+  const scene = new THREE.Scene();
+
+  // Parse background color
+  if (bgColor === 'transparent') {
+    scene.background = null;
+    renderer.setClearColor(0x000000, 0);
+  } else if (bgColor === 'white') {
+    scene.background = new THREE.Color(0xffffff);
+    renderer.setClearColor(0xffffff, 1);
+  } else if (bgColor === 'black') {
+    scene.background = new THREE.Color(0x000000);
+    renderer.setClearColor(0x000000, 1);
+  } else if (bgColor.startsWith('#')) {
+    const hexColor = parseInt(bgColor.slice(1), 16);
+    scene.background = new THREE.Color(hexColor);
+    renderer.setClearColor(hexColor, 1);
+  }
+
+  // Camera setup for FULL BODY view (different from head view)
+  const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
+  camera.position.set(0, 0.6, -2.5);  // Further back, centered on body
+  camera.lookAt(0, 0.5, 0);
+
+  // FIX: In-Game Lighting Model (Bright, Vibrant, matches game)
+  const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+  hemiLight.position.set(0, 20, 0);
+  scene.add(hemiLight);
+
+  const frontLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  frontLight.position.set(10, 20, 20);
+  scene.add(frontLight);
+
+  const backLight = new THREE.DirectionalLight(0xffffff, 0.4);
+  backLight.position.set(-5, 5, -10);
+  scene.add(backLight);
+
+  // Character group
+  const character = new THREE.Group();
+  character.rotation.y = Math.PI;
+  scene.add(character);
+  timings.renderSetupEnd = Date.now();
+
+  // Build character
+  timings.buildStart = Date.now();
+  await buildCharacter(modelData, character);
+  timings.buildEnd = Date.now();
+
+  // Apply OIT sorting
+  timings.oitStart = Date.now();
+  applyOITSorting(scene, camera);
+  timings.oitEnd = Date.now();
+
+  // Render
+  timings.render = Date.now();
+  renderer.render(scene, camera);
+  timings.renderEnd = Date.now();
+
+  // Extract pixels
+  timings.extractStart = Date.now();
+  const pixels = new Uint8Array(width * height * 4);
+  glContext.readPixels(0, 0, width, height, glContext.RGBA, glContext.UNSIGNED_BYTE, pixels);
+
+  // Flip vertically
+  const flipped = new Uint8Array(width * height * 4);
+  const rowSize = width * 4;
+  for (let y = 0; y < height; y++) {
+    const srcRow = y * rowSize;
+    const dstRow = (height - 1 - y) * rowSize;
+    flipped.set(pixels.subarray(srcRow, srcRow + rowSize), dstRow);
+  }
+
+  // Convert to PNG
+  const pngBuffer = await sharp(Buffer.from(flipped), {
+    raw: { width, height, channels: 4 }
+  }).png().toBuffer();
+  timings.extractEnd = Date.now();
+
+  // Cleanup
+  renderer.dispose();
+
+  const totalTime = Date.now() - startTime;
+
+  return {
+    buffer: pngBuffer,
+    timings: {
+      total: totalTime,
+      dataLoad: timings.dataEnd - timings.dataStart,
+      renderSetup: timings.renderSetupEnd - timings.renderSetup,
+      characterBuild: timings.buildEnd - timings.buildStart,
+      oitSort: timings.oitEnd - timings.oitStart,
       render: timings.renderEnd - timings.render,
       extract: timings.extractEnd - timings.extractStart
     }
@@ -1127,6 +1792,8 @@ module.exports = {
   isAvailable,
   getInitError,
   getStatus,
+  renderHeadFromSkinData,
+  renderFullBodyFromSkinData,
   renderHead,
   createRenderer,
   loadTextureFromAsset,

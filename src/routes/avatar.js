@@ -440,6 +440,7 @@ function generateHeadEmbedHtml(uuid, bgParam = 'transparent') {
 <body>
   <div id="canvas-container"></div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="/assets/depth-peeling.js"></script>
   <script src="/assets/avatar.js"></script>
   <script>
     const UUID = '${uuid}';
@@ -595,6 +596,7 @@ function generateAvatarViewerHtml(uuid) {
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="/assets/depth-peeling.js"></script>
   <script src="/assets/avatar.js"></script>
   <script>
     const UUID = '${uuid}';

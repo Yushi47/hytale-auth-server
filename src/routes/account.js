@@ -49,15 +49,30 @@ async function handleProfileLookupByUuid(req, res, lookupUuid, headers) {
     username = await storage.getUsername(lookupUuid);
   }
 
+  const userDataObj = await storage.getUserData(lookupUuid);
+  if (!username && userDataObj.username) {
+    username = userDataObj.username;
+  }
+
   // If not found, return a generic name based on UUID
   if (!username) {
     username = `Player_${lookupUuid.substring(0, 8)}`;
     console.log(`UUID ${lookupUuid} not found in records, returning generic name`);
   }
 
-  sendJson(res, 200, {
+  const profile = {
     uuid: lookupUuid,
     username: username
+  };
+
+  if (userDataObj && userDataObj.skin) {
+    profile.skin = JSON.stringify(userDataObj.skin);
+  } else {
+    profile.skin = null;
+  }
+
+  sendJson(res, 200, {
+    ...profile
   });
 }
 
@@ -210,10 +225,10 @@ function handleGetProfiles(req, res, body, uuid, name) {
   console.log('get-profiles:', uuid, name);
 
   sendJson(res, 200, {
+    owner: uuid,
     profiles: [{
       uuid: uuid,
-      username: name,
-      entitlements: ["game.base"]
+      username: name
     }]
   });
 }
@@ -236,7 +251,6 @@ async function handlePlayerSkinsGet(req, res, body, uuid, name) {
 
   console.log('player-skins GET: returning', playerSkins.length, 'skins, activeSkin:', activeSkin);
 
-  // F2P: Allow up to 10 avatar profiles (more generous than official 5)
   sendJson(res, 200, {
     activeSkin: activeSkin || null,
     maxSkins: 10,

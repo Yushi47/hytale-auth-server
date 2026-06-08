@@ -720,6 +720,63 @@ async function saveUserData(uuid, data) {
   }
 }
 
+async function updateUserData(uuid, updater) {
+  const existingData = await getUserData(uuid);
+  const nextData = updater(existingData || {}) || existingData || {};
+  await saveUserData(uuid, nextData);
+  return nextData;
+}
+
+async function getPresenceSettings(uuid) {
+  const userData = await getUserData(uuid);
+  return userData.presenceSettings || null;
+}
+
+async function savePresenceSettings(uuid, settings) {
+  const updated = await updateUserData(uuid, (userData) => {
+    userData.presenceSettings = settings;
+    userData.presenceSettingsUpdatedAt = new Date().toISOString();
+    return userData;
+  });
+  return updated.presenceSettings;
+}
+
+async function savePresenceHeartbeat(uuid, heartbeat) {
+  const updated = await updateUserData(uuid, (userData) => {
+    userData.presenceHeartbeat = {
+      ...heartbeat,
+      updatedAt: new Date().toISOString(),
+    };
+    return userData;
+  });
+  return updated.presenceHeartbeat;
+}
+
+async function getServerDiscoveryInteractions(uuid) {
+  const userData = await getUserData(uuid);
+  return {
+    likedServers: Array.isArray(userData.likedServers) ? userData.likedServers : [],
+    favoriteServers: Array.isArray(userData.favoriteServers) ? userData.favoriteServers : [],
+  };
+}
+
+async function addServerDiscoveryInteraction(uuid, serverUuid, interactionType) {
+  const field = interactionType === 'favorite' ? 'favoriteServers' : 'likedServers';
+  const updated = await updateUserData(uuid, (userData) => {
+    const values = Array.isArray(userData[field]) ? userData[field] : [];
+    if (!values.includes(serverUuid)) {
+      values.push(serverUuid);
+    }
+    userData[field] = values;
+    userData.serverDiscoveryInteractionsUpdatedAt = new Date().toISOString();
+    return userData;
+  });
+  return {
+    likedServers: Array.isArray(updated.likedServers) ? updated.likedServers : [],
+    favoriteServers: Array.isArray(updated.favoriteServers) ? updated.favoriteServers : [],
+  };
+}
+
 // ============================================================================
 // ATOMIC PLAYER SKINS OPERATIONS (Multi-worker safe)
 // ============================================================================
@@ -2166,11 +2223,9 @@ async function consumeDeviceCode(deviceCode) {
 
 const SETTINGS_KEY = 'settings:global';
 
-// Default download links (used if not configured)
-const DEFAULT_DOWNLOAD_LINKS = {
-  'HytaleServer.jar': 'https://s3.g.s4.mega.io/kcvismkrtfcalgwxzsazbq46l72dwsypqaham/hytale/HytaleServer.jar',
-  'Assets.zip': 'https://s3.g.s4.mega.io/kcvismkrtfcalgwxzsazbq46l72dwsypqaham/hytale/Assets.zip'
-};
+// Default to local synced files. External links may be configured explicitly,
+// but stale CDN redirects must not override the manifest-driven release sync.
+const DEFAULT_DOWNLOAD_LINKS = {};
 
 // Default patches CDN base URL (MEGA S4 mirror — used by Caddy redirect)
 const DEFAULT_PATCHES_CDN_BASE_URL = 'https://s3.g.s4.mega.io/kcvismkrtfcalgwxzsazbq46l72dwsypqaham/hytale/patches';
@@ -2597,10 +2652,16 @@ module.exports = {
   persistUsername,
   getUserData,
   saveUserData,
+  updateUserData,
   atomicUpdateSkin,
   getUsername,
   getCachedUsername,
   setCachedUsername,
+  getPresenceSettings,
+  savePresenceSettings,
+  savePresenceHeartbeat,
+  getServerDiscoveryInteractions,
+  addServerDiscoveryInteraction,
 
   // Player skins (atomic operations)
   getPlayerSkins,

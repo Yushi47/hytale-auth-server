@@ -17,12 +17,15 @@ class HytaleAvatarViewer {
       autoRotate: options.autoRotate !== false,
       showGrid: options.showGrid !== false,
       backgroundColor: options.backgroundColor || 0x1a1a2e,
+      useOIT: options.useOIT !== false, // Enable OIT by default
+      oitLayers: options.oitLayers || 4, // Number of depth peeling layers
       ...options
     };
 
     this.scene = null;
     this.camera = null;
     this.renderer = null;
+    this.oitRenderer = null; // Depth peeling OIT renderer
     this.character = null;
     this.modelData = null;
     this.wireframeMode = false;
@@ -70,17 +73,16 @@ class HytaleAvatarViewer {
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.container.appendChild(this.renderer.domElement);
 
-    // Lighting
-    this.scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+    // FIX: In-Game Lighting Model (Bright, Vibrant, matches game)
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+    hemiLight.position.set(0, 20, 0);
+    this.scene.add(hemiLight);
     const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
-    dirLight.position.set(2, 3, 2);
+    dirLight.position.set(10, 20, 20);
     this.scene.add(dirLight);
-    const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
-    backLight.position.set(-2, 1, -2);
+    const backLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    backLight.position.set(-5, 5, -10);
     this.scene.add(backLight);
-    const fillLight = new THREE.DirectionalLight(0xffffff, 0.2);
-    fillLight.position.set(0, -1, 2);
-    this.scene.add(fillLight);
 
     if (this.options.showGrid) {
       this.scene.add(new THREE.GridHelper(2, 10, 0x444444, 0x333333));
@@ -92,6 +94,16 @@ class HytaleAvatarViewer {
 
     this.textureLoader = new THREE.TextureLoader();
 
+    // Initialize OIT renderer if enabled and DepthPeelingRenderer is available
+    if (this.options.useOIT && typeof DepthPeelingRenderer !== 'undefined') {
+      this.oitRenderer = new DepthPeelingRenderer(this.renderer, this.scene, this.camera, {
+        layers: this.options.oitLayers
+      });
+      console.log('[OIT] Depth peeling enabled with', this.options.oitLayers, 'layers');
+    } else if (this.options.useOIT) {
+      console.warn('[OIT] DepthPeelingRenderer not available, falling back to standard rendering');
+    }
+
     // Setup resize handler
     this._resizeHandler = () => {
       const w = this.container.clientWidth;
@@ -99,6 +111,10 @@ class HytaleAvatarViewer {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
+      // Also resize OIT renderer
+      if (this.oitRenderer) {
+        this.oitRenderer.resize(w, h);
+      }
     };
     window.addEventListener('resize', this._resizeHandler);
 
@@ -206,6 +222,39 @@ class HytaleAvatarViewer {
     }
   }
 
+  // Load avatar from pre-resolved model data (for mock skins / debug testing)
+  async loadFromModelData(modelData) {
+    try {
+      this.onLoadProgress('Building character from model data...');
+
+      // Clear existing character
+      while (this.character.children.length > 0) {
+        this.character.remove(this.character.children[0]);
+      }
+      this.originalTransforms.clear();
+      this.hiddenBodyParts.clear();
+      this.polygonOffsetParts.clear();
+
+      // Use provided model data directly
+      this.modelData = modelData;
+
+      this._determineHiddenParts(this.modelData);
+      await this._buildCharacter(this.modelData);
+
+      // Start animation loop if not already running
+      if (!this._animating) {
+        this._animating = true;
+        this.lastFrameTime = performance.now();
+        this._animate();
+      }
+
+      this.onLoadComplete(this.modelData);
+    } catch (err) {
+      this.onError(err);
+      throw err;
+    }
+  }
+
   // Animation methods
   async setAnimation(animPath) {
     this.currentAnimationPath = animPath;
@@ -242,6 +291,10 @@ class HytaleAvatarViewer {
   // Cleanup
   destroy() {
     window.removeEventListener('resize', this._resizeHandler);
+    if (this.oitRenderer) {
+      this.oitRenderer.dispose();
+      this.oitRenderer = null;
+    }
     if (this.renderer) {
       this.renderer.dispose();
       this.container.removeChild(this.renderer.domElement);
@@ -271,10 +324,8 @@ class HytaleAvatarViewer {
       this.hiddenBodyParts.add('L-Foot');
       this.hiddenBodyParts.add('R-Foot');
     }
-    if (data.parts?.haircut) {
-      this.hiddenBodyParts.add('HeadTop');
-      this.hiddenBodyParts.add('HairBase');
-    }
+    // Note: 'HeadTop' and 'HairBase' don't exist in Player.blockymodel
+    // Haircuts are separate cosmetic models that attach to the Head bone
   }
 
   async _loadAnimation(animPath) {
@@ -319,7 +370,12 @@ class HytaleAvatarViewer {
       this.character.rotation.y += 0.005;
     }
 
-    this.renderer.render(this.scene, this.camera);
+    // Use OIT renderer if available, otherwise standard render
+    if (this.oitRenderer) {
+      this.oitRenderer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 
   _applyAnimation(animation, time) {
@@ -549,10 +605,11 @@ class HytaleAvatarViewer {
             g = gradientData.data[gradIdx + 1];
             b = gradientData.data[gradIdx + 2];
           } else if (color) {
+            // Simple tinting: greyscale modulates color brightness
             const t = grey / 255;
-            r = Math.round(Math.min(255, color.r * t * 2));
-            g = Math.round(Math.min(255, color.g * t * 2));
-            b = Math.round(Math.min(255, color.b * t * 2));
+            r = Math.round(color.r * t);
+            g = Math.round(color.g * t);
+            b = Math.round(color.b * t);
           } else {
             r = grey; g = grey; b = grey;
           }
@@ -662,7 +719,8 @@ class HytaleAvatarViewer {
       console.error('[AVATAR] Could not load player model:', e);
     }
 
-    // Cosmetics render order
+    // Cosmetics render order - order matters for layering
+    // facialHair must come AFTER face with higher zOffset to render in front
     const cosmeticOrder = [
       { key: 'underwear', zOffset: 0 },
       { key: 'pants', zOffset: 0.001 },
@@ -671,15 +729,15 @@ class HytaleAvatarViewer {
       { key: 'undertop', zOffset: 0.001 },
       { key: 'overtop', zOffset: 0.002 },
       { key: 'gloves', zOffset: 0.001 },
-      { key: 'face', zOffset: 0.01 },
-      { key: 'mouth', zOffset: 0.015 },
-      { key: 'eyes', zOffset: 0.02 },
-      { key: 'eyebrows', zOffset: 0.025 },
       { key: 'ears', zOffset: 0 },
+      { key: 'face', zOffset: 0.01 },
+      { key: 'facialHair', zOffset: 0.02 },  // AFTER face, higher zOffset
+      { key: 'mouth', zOffset: 0.025 },
+      { key: 'eyes', zOffset: 0.03 },
+      { key: 'eyebrows', zOffset: 0.035 },
       { key: 'haircut', zOffset: 0.005 },
-      { key: 'facialHair', zOffset: 0.004 },
       { key: 'headAccessory', zOffset: 0.006 },
-      { key: 'faceAccessory', zOffset: 0.005 },
+      { key: 'faceAccessory', zOffset: 0.015 },
       { key: 'earAccessory', zOffset: 0.001 },
       { key: 'cape', zOffset: -0.001 }
     ];
@@ -864,17 +922,24 @@ class HytaleAvatarViewer {
         mesh = this._createBoxMesh(node.shape, color, nodeName, texture);
       } else if (node.shape.type === 'quad') {
         if (partType === 'eyes' && nodeName.includes('Background') && shadowTexture) {
+          // Eye background with shadow - mark for OIT
           mesh = this._createQuadMesh(node.shape, color, nodeName, shadowTexture);
           mesh.renderOrder = 100;
           mesh.material.transparent = true;
-          mesh.material.depthWrite = false;
+          mesh.material.depthWrite = true; // Enable for OIT depth peeling
           mesh.material.alphaTest = 0;
           mesh.material.blending = THREE.NormalBlending;
+          // Mark for OIT rendering
+          mesh.userData.oitTransparent = true;
         } else {
           mesh = this._createQuadMesh(node.shape, color, nodeName, texture);
 
           if (mesh && partType === 'eyes' && nodeName.includes('Eye') && !nodeName.includes('Attachment') && !nodeName.includes('Background')) {
+            // Eye pupil - mark for OIT
             mesh.renderOrder = 101;
+            mesh.material.transparent = true;
+            mesh.material.depthWrite = true; // Enable for OIT depth peeling
+            mesh.userData.oitTransparent = true;
           }
         }
 

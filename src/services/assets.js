@@ -240,16 +240,34 @@ function resolveSkinPart(category, partValue, configs, gradientSets) {
 
   // Parse "PartId.ColorId" or "PartId.ColorId.Variant" format
   const parts = partValue.split('.');
-  const partId = parts[0];
+  const rawPartId = parts[0];
   // Handle empty color (e.g., "ItemId..VariantId") by treating empty string as null
   const colorId = (parts.length > 1 && parts[1]) ? parts[1] : null;
   const variantId = (parts.length > 2 && parts[2]) ? parts[2] : null;
 
-  console.log(`[resolveSkinPart] ${category}: partValue="${partValue}" -> partId="${partId}", colorId="${colorId}", variantId="${variantId}"`);
+  console.log(`[resolveSkinPart] ${category}: partValue="${partValue}" -> partId="${rawPartId}", colorId="${colorId}", variantId="${variantId}"`);
 
-  const partConfig = configs[category][partId];
+  // 1. Try exact match
+  let partConfig = configs[category][rawPartId];
+  let partId = rawPartId;
+
+  // 2. Fuzzy match (Case-insensitive) if exact match fails
+  // Fixes "naked character" issue when mock IDs use different casing than asset files
   if (!partConfig) {
-    console.log(`[resolveSkinPart] ${category}: partConfig not found for "${partId}"`);
+    const lowerRawId = rawPartId.toLowerCase();
+    const potentialMatch = Object.keys(configs[category]).find(key =>
+      key.toLowerCase() === lowerRawId
+    );
+
+    if (potentialMatch) {
+      partConfig = configs[category][potentialMatch];
+      partId = potentialMatch;
+      console.log(`[resolveSkinPart] Fuzzy matched "${rawPartId}" -> "${potentialMatch}"`);
+    }
+  }
+
+  if (!partConfig) {
+    console.log(`[resolveSkinPart] ${category}: partConfig not found for "${rawPartId}"`);
     return null;
   }
 

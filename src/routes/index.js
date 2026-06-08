@@ -11,4 +11,7 @@ module.exports = {
   debug: require('./debug'),
   logSubmissions: require('./logSubmissions'),
   player: require('./player'),
+  social: require('./social'),
+  liveConfig: require('./liveConfig'),
+  serverDiscovery: require('./serverDiscovery'),
 };

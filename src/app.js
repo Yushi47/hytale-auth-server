@@ -168,6 +168,18 @@ async function routeRequest(req, res, url, urlPath, body, uuid, name, tokenScope
     return;
   }
 
+  if (routes.liveConfig.handleLiveConfigRoutes(req, res, url, urlPath)) {
+    return;
+  }
+
+  if (await routes.serverDiscovery.handleServerDiscoveryRoutes(req, res, url, urlPath, uuid)) {
+    return;
+  }
+
+  if (await routes.social.handleSocialRoutes(req, res, urlPath, body, uuid)) {
+    return;
+  }
+
   // Health check
   if (urlPath === '/health' || urlPath === '/') {
     routes.health.handleHealth(req, res);
@@ -903,6 +915,13 @@ async function startServer() {
 
   // Create HTTP server
   const server = http.createServer(handleRequest);
+  server.on('upgrade', (req, socket) => {
+    const timestamp = new Date().toISOString();
+    const clientIp = requestLogger.getClientIp(req);
+    console.log(`${timestamp} UPGRADE ${req.url} [${clientIp}] rejected`);
+    socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+  });
   server.listen(config.port, '0.0.0.0', () => {
     const workerId = cluster.isWorker ? `Worker ${cluster.worker.id}` : 'Main';
     console.log(`[${workerId}] Server running on port ${config.port}`);

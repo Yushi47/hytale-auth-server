@@ -173,19 +173,19 @@ class ThumbnailRenderer {
     // Create camera (will be configured per render)
     this.camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
 
-    // Setup lights
+    // Setup lights - FIX P0: Reduced intensity to ~1.0 total (was 1.8x causing overexposure)
     this.lights = new THREE.Group();
-    this.lights.add(new THREE.AmbientLight(0xffffff, 0.7));
+    this.lights.add(new THREE.AmbientLight(0xffffff, 0.4));
 
-    const dirLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.35);
     dirLight.position.set(2, 3, 2);
     this.lights.add(dirLight);
 
-    const backLight = new THREE.DirectionalLight(0xffffff, 0.3);
+    const backLight = new THREE.DirectionalLight(0xffffff, 0.15);
     backLight.position.set(-2, 1, -2);
     this.lights.add(backLight);
 
-    const fillLight = new THREE.DirectionalLight(0xffffff, 0.2);
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.1);
     fillLight.position.set(0, -1, 2);
     this.lights.add(fillLight);
 
@@ -872,10 +872,11 @@ class ThumbnailRenderer {
             g = gradientData[gradIdx + 1];
             b = gradientData[gradIdx + 2];
           } else if (color) {
+            // FIX P0: Remove * 2 multiplier that caused color overexposure
             const t = grey / 255;
-            r = Math.round(Math.min(255, color.r * t * 2));
-            g = Math.round(Math.min(255, color.g * t * 2));
-            b = Math.round(Math.min(255, color.b * t * 2));
+            r = Math.round(Math.min(255, color.r * t));
+            g = Math.round(Math.min(255, color.g * t));
+            b = Math.round(Math.min(255, color.b * t));
           } else {
             r = grey; g = grey; b = grey;
           }

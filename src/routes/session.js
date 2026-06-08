@@ -17,6 +17,12 @@ function verifyBearerToken(req) {
   return auth.verifyToken(token);
 }
 
+async function getTokenExtraClaims(uuid) {
+  const userData = await storage.getUserData(uuid);
+  if (!userData?.skin) return {};
+  return { skin: JSON.stringify(userData.skin) };
+}
+
 /**
  * For password-protected UUIDs, require either:
  * 1. A valid Bearer token with matching sub (game client already authenticated), OR
@@ -78,8 +84,9 @@ async function handleGameSessionNew(req, res, body, uuid, name) {
 
   // Get request host for dynamic issuer
   const requestHost = req.headers.host;
+  const extraClaims = await getTokenExtraClaims(uuid);
 
-  const identityToken = auth.generateIdentityToken(uuid, name, scopes, ['game.base'], requestHost);
+  const identityToken = auth.generateIdentityToken(uuid, name, scopes, ['game.base'], requestHost, extraClaims);
   const sessionToken = auth.generateSessionToken(uuid, name, requestHost);
 
   // Register the session
@@ -113,8 +120,9 @@ async function handleGameSessionRefresh(req, res, body, uuid, name, headers) {
 
   // Get request host for dynamic issuer
   const requestHost = req.headers.host;
+  const extraClaims = await getTokenExtraClaims(uuid);
 
-  const identityToken = auth.generateIdentityToken(uuid, name, scopes, ['game.base'], requestHost);
+  const identityToken = auth.generateIdentityToken(uuid, name, scopes, ['game.base'], requestHost, extraClaims);
   const sessionToken = auth.generateSessionToken(uuid, name, requestHost);
 
   // Update session
@@ -145,8 +153,9 @@ async function handleGameSessionChild(req, res, body, uuid, name) {
 
   // Get request host for dynamic issuer
   const requestHost = req.headers.host;
+  const extraClaims = await getTokenExtraClaims(uuid);
 
-  const childToken = auth.generateIdentityToken(uuid, name, scopes, ['game.base'], requestHost);
+  const childToken = auth.generateIdentityToken(uuid, name, scopes, ['game.base'], requestHost, extraClaims);
   const sessionToken = auth.generateSessionToken(uuid, name, requestHost);
 
   // Calculate expiresAt for Java client compatibility
@@ -260,8 +269,9 @@ async function handleAuthorizationGrant(req, res, body, uuid, name, headers) {
 
   // Get request host for dynamic issuer
   const requestHost = req.headers.host;
+  const extraClaims = await getTokenExtraClaims(uuid);
 
-  const authGrant = auth.generateAuthorizationGrant(uuid, name, audience, scopes, requestHost);
+  const authGrant = auth.generateAuthorizationGrant(uuid, name, audience, scopes, requestHost, extraClaims);
   const expiresAt = new Date(Date.now() + config.sessionTtl * 1000).toISOString();
 
   // Track this auth grant - player is joining this server
@@ -302,8 +312,9 @@ async function handleTokenExchange(req, res, body, uuid, name, headers) {
 
   // Get request host for dynamic issuer
   const requestHost = req.headers.host;
+  const extraClaims = await getTokenExtraClaims(uuid);
 
-  const accessToken = auth.generateAccessToken(uuid, name, audience, certFingerprint, scopes, requestHost);
+  const accessToken = auth.generateAccessToken(uuid, name, audience, certFingerprint, scopes, requestHost, extraClaims);
   const refreshToken = auth.generateSessionToken(uuid, name, requestHost);
   const expiresAt = new Date(Date.now() + config.sessionTtl * 1000).toISOString();
 
