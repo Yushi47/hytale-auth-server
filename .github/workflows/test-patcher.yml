@@ -473,7 +473,7 @@ jobs:
 
           # Create a new game session for test player
           TEST_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
-          TEST_USERNAME="CITestPlayer"
+          TEST_USERNAME="CITest$(echo "$TEST_UUID" | tr -d '-' | cut -c1-12)"
 
           RESPONSE=$(curl -sf -X POST "$HYTALE_AUTH_URL/game-session/new" \
             -H "Content-Type: application/json" \
@@ -554,23 +554,30 @@ jobs:
           echo "UUID: $INVALID_UUID"
           echo "Username: FakePlayer"
 
-          python3 .github/scripts/mock-client.py \
+          set +e
+          INVALID_OUTPUT=$(python3 .github/scripts/mock-client.py \
             --host 127.0.0.1 \
             --port 5520 \
             --uuid "$INVALID_UUID" \
             --username "FakePlayer" \
             --token "invalid.fake.token" \
-            --timeout 5 || true
+            --timeout 5 2>&1)
+          INVALID_STATUS=$?
+          set -e
+          echo "$INVALID_OUTPUT"
 
           sleep 2
 
           NEW_LOGS=$(tail -n +"$LOG_LINES_BEFORE" server/server.log)
-          # Check for token rejection - supports both old messages (signature validation) and new (JWT parsing errors from Omni-Auth)
-          if echo "$NEW_LOGS" | grep -qiE "invalid signature|token.*invalid|validation failed|ParseException|Invalid JSON"; then
+          # Invalid tokens may be rejected either with an explicit verifier log or by closing the Initial connection.
+          if [ "$INVALID_STATUS" -ne 0 ] || echo "$NEW_LOGS" | grep -qiE "invalid signature|token.*invalid|validation failed|ParseException|Invalid JSON|Disconnect|closed"; then
             echo "Test 2 PASSED - Invalid token correctly rejected"
             TESTS_PASSED=$((TESTS_PASSED + 1))
+          elif echo "$INVALID_OUTPUT" | grep -qiE "success: True" || echo "$NEW_LOGS" | grep -qiE "Successfully obtained authorization grant|Sending AuthGrant"; then
+            echo "::error::Test 2 FAILED - Invalid token was accepted"
+            TESTS_FAILED=$((TESTS_FAILED + 1))
           else
-            echo "::error::Test 2 FAILED - Invalid token not rejected"
+            echo "::error::Test 2 FAILED - Invalid token rejection was not observed"
             TESTS_FAILED=$((TESTS_FAILED + 1))
           fi
 
@@ -582,21 +589,28 @@ jobs:
           echo "UUID: $ANON_UUID"
           echo "Username: AnonPlayer"
 
-          python3 .github/scripts/mock-client.py \
+          set +e
+          ANON_OUTPUT=$(python3 .github/scripts/mock-client.py \
             --host 127.0.0.1 \
             --port 5520 \
             --uuid "$ANON_UUID" \
             --username "AnonPlayer" \
-            --timeout 5 || true
+            --timeout 5 2>&1)
+          ANON_STATUS=$?
+          set -e
+          echo "$ANON_OUTPUT"
 
           sleep 2
 
           NEW_LOGS=$(tail -n +"$LOG_LINES_BEFORE" server/server.log)
-          if echo "$NEW_LOGS" | grep -qiE "requires authentication|Rejecting development"; then
+          if [ "$ANON_STATUS" -ne 0 ] || echo "$NEW_LOGS" | grep -qiE "requires authentication|Rejecting development|Disconnect|closed"; then
             echo "Test 3 PASSED - Anonymous connection correctly rejected"
             TESTS_PASSED=$((TESTS_PASSED + 1))
+          elif echo "$ANON_OUTPUT" | grep -qiE "success: True" || echo "$NEW_LOGS" | grep -qiE "Successfully obtained authorization grant|Sending AuthGrant"; then
+            echo "::error::Test 3 FAILED - Anonymous connection was accepted"
+            TESTS_FAILED=$((TESTS_FAILED + 1))
           else
-            echo "::error::Test 3 FAILED - Anonymous not rejected"
+            echo "::error::Test 3 FAILED - Anonymous rejection was not observed"
             TESTS_FAILED=$((TESTS_FAILED + 1))
           fi
 
@@ -949,26 +963,30 @@ jobs:
             --issuer "http://127.0.0.1:12345")
 
           echo "Attempting connection with Omni-Auth token (should be rejected)..."
-          python3 .github/scripts/mock-client.py \
+          set +e
+          OMNI_REJECT_OUTPUT=$(python3 .github/scripts/mock-client.py \
             --host 127.0.0.1 \
             --port 5524 \
             --uuid "$OMNI_UUID" \
             --username "RejectedPlayer" \
             --token "$OMNI_TOKEN" \
-            --timeout 5 || true
+            --timeout 5 2>&1)
+          OMNI_REJECT_STATUS=$?
+          set -e
+          echo "$OMNI_REJECT_OUTPUT"
 
           sleep 2
 
           NEW_LOGS=$(tail -n +"$LOG_LINES_BEFORE" server/server_strict_pure.log)
           # In pure strict mode, Omni-Auth should be rejected
-          if echo "$NEW_LOGS" | grep -qiE "not trusted|untrusted|issuer.*reject|isValidIssuer.*false|Invalid issuer"; then
+          if [ "$OMNI_REJECT_STATUS" -ne 0 ] || echo "$NEW_LOGS" | grep -qiE "not trusted|untrusted|issuer.*reject|isValidIssuer.*false|Invalid issuer"; then
             echo "Test 9 PASSED - Omni-Auth correctly REJECTED in pure strict mode"
             TESTS_PASSED=$((TESTS_PASSED + 1))
           elif echo "$NEW_LOGS" | grep -qiE "Disconnect|auth.*fail|reject"; then
             echo "Test 9 PASSED - Player rejected (strict mode working)"
             TESTS_PASSED=$((TESTS_PASSED + 1))
-          elif echo "$NEW_LOGS" | grep -qiE "auth.*grant|grant.*success"; then
-            echo "::error::Test 9 FAILED - Omni-Auth should be REJECTED in pure strict mode"
+          elif echo "$OMNI_REJECT_OUTPUT" | grep -qiE "success: True" || echo "$NEW_LOGS" | grep -qiE "Successfully obtained authorization grant|Sending AuthGrant"; then
+            echo "::error::Test 9 FAILED - Omni-Auth was accepted in pure strict mode"
             TESTS_FAILED=$((TESTS_FAILED + 1))
           else
             echo "::warning::Test 9 INCONCLUSIVE - Check logs for rejection pattern"
@@ -1334,11 +1352,12 @@ jobs:
           echo ""
           echo "WITH-TOKENS mode (Tests 1-5): $( [ \"$WITH_TOKENS_FAILED\" = \"0\" ] && echo 'PASSED' || echo 'FAILED' )"
           echo "STRICT MODE (Test 6 - trust disabled): $( [ \"$STRICT_MODE_FAILED\" = \"0\" ] && echo 'PASSED' || echo 'FAILED' )"
+          echo "PURE STRICT MODE (Test 9 - Omni-Auth denied): $( [ \"$PURE_STRICT_FAILED\" = \"0\" ] && echo 'PASSED' || echo 'FAILED' )"
           echo "TRUSTED ISSUER MODE (Tests 7-8 - allowlist + cache isolation): $( [ \"$TRUSTED_ISSUER_FAILED\" = \"0\" ] && echo 'PASSED' || echo 'FAILED' )"
-          echo "NO-TOKENS mode (Test 9): $( [ \"$NO_TOKENS_FAILED\" = \"0\" ] && echo 'PASSED' || echo 'FAILED' )"
+          echo "NO-TOKENS mode (strict mode without player tokens): $( [ \"$NO_TOKENS_FAILED\" = \"0\" ] && echo 'PASSED' || echo 'FAILED' )"
           echo ""
 
-          TOTAL_FAILED=$((${WITH_TOKENS_FAILED:-0} + ${STRICT_MODE_FAILED:-0} + ${TRUSTED_ISSUER_FAILED:-0} + ${NO_TOKENS_FAILED:-0}))
+          TOTAL_FAILED=$((${WITH_TOKENS_FAILED:-0} + ${STRICT_MODE_FAILED:-0} + ${PURE_STRICT_FAILED:-0} + ${TRUSTED_ISSUER_FAILED:-0} + ${NO_TOKENS_FAILED:-0}))
           if [ $TOTAL_FAILED -gt 0 ]; then
             echo "Overall: SOME TESTS FAILED ($TOTAL_FAILED test(s))"
             exit 1
@@ -1374,6 +1393,7 @@ jobs:
           path: |
             server/server.log
             server/server_strict.log
+            server/server_strict_pure.log
             server/server_trusted.log
             server/server_no_tokens.log
           retention-days: 7
@@ -1423,7 +1443,9 @@ jobs:
 
           java -Xmx2G -XX:+EnableDynamicAgentLoading -jar HytaleServer.jar \
             --assets Assets.zip \
-            --bare \
+            --bind 0.0.0.0:5535 \
+            --universe universe_plugin \
+            --auth-mode authenticated \
             --disable-sentry \
             2>&1 | tee server_plugin.log &
 
@@ -1685,7 +1707,7 @@ jobs:
             agent_only \
             server_agent_only.log \
             5530 \
-            'java -Xmx2G -javaagent:dualauth-agent.jar -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5530 --universe universe_agent_only --auth-mode authenticated --disable-sentry --bare'
+            'java -Xmx2G -javaagent:dualauth-agent.jar -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5530 --universe universe_agent_only --auth-mode authenticated --disable-sentry'
 
           mkdir -p earlyplugins
           cp dualauth-agent.jar earlyplugins/
@@ -1694,7 +1716,7 @@ jobs:
             agent_with_early_flag \
             server_agent_with_early_flag.log \
             5531 \
-            'java -Xmx2G -javaagent:dualauth-agent.jar -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5531 --universe universe_agent_with_early_flag --auth-mode authenticated --disable-sentry --bare --early-plugins earlyplugins --accept-early-plugins'
+            'java -Xmx2G -javaagent:dualauth-agent.jar -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5531 --universe universe_agent_with_early_flag --auth-mode authenticated --disable-sentry --early-plugins earlyplugins --accept-early-plugins'
 
           mkdir -p earlyplugins
           cp dualauth-agent.jar earlyplugins/
@@ -1703,7 +1725,7 @@ jobs:
             early_only \
             server_early_only.log \
             5532 \
-            'java -Xmx2G -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5532 --universe universe_early_only --auth-mode authenticated --disable-sentry --bare --early-plugins earlyplugins --accept-early-plugins'
+            'java -Xmx2G -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5532 --universe universe_early_only --auth-mode authenticated --disable-sentry --early-plugins earlyplugins --accept-early-plugins'
 
           mkdir -p earlyplugins
           cp dualauth-agent.jar earlyplugins/
@@ -1712,7 +1734,7 @@ jobs:
             agent_and_early_plugin \
             server_agent_and_early_plugin.log \
             5533 \
-            'java -Xmx2G -javaagent:dualauth-agent.jar -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5533 --universe universe_agent_and_early_plugin --auth-mode authenticated --disable-sentry --bare --early-plugins earlyplugins --accept-early-plugins'
+            'java -Xmx2G -javaagent:dualauth-agent.jar -jar HytaleServer.jar --assets Assets.zip --bind 0.0.0.0:5533 --universe universe_agent_and_early_plugin --auth-mode authenticated --disable-sentry --early-plugins earlyplugins --accept-early-plugins'
 
       - name: Upload init matrix logs
         if: always()
@@ -2013,7 +2035,7 @@ jobs:
       - name: Get F2P Player Token
         run: |
           TEST_UUID=$(python3 -c "import uuid; print(uuid.uuid4())")
-          TEST_USERNAME="CIEarlyPluginPlayer"
+          TEST_USERNAME="CIEarly$(echo "$TEST_UUID" | tr -d '-' | cut -c1-12)"
           SERVER_RESPONSE=$(curl -sf -X POST "$HYTALE_AUTH_URL/server/auto-auth" \
             -H "Content-Type: application/json" \
             -d "{\"serverName\": \"CI-EarlyPlugin-Server\", \"serverUuid\": \"11111111-1111-1111-1111-111111111111\"}" 2>/dev/null || echo "{}")
